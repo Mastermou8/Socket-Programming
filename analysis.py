@@ -7,3 +7,11 @@ ADDR = (IP, PORT)
 SIZE = 1024  ## byte .. buffer size
 FORMAT = "utf-8"
 SERVER_DATA_PATH = "server_data"
+
+def main():
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(ADDR)
+
+
+if __name__ == "__main__":
+    main()
