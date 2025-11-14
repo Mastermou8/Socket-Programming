@@ -2,6 +2,8 @@ import socket
 import os
 import hashlib
 import threading
+import mimetypes
+from collections import defaultdict
 
 IP = "192.168.131.8"
 PORT = 4450
@@ -17,9 +19,75 @@ USERS = {
     "user1": "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
 }
 
+# Client connection pool
+active_clients = {}
+clients_lock = threading.Lock()
+
 # Track files being processed
 files_in_use = set()
 files_lock = threading.Lock()
+
+# File counter for logical naming (type -> counter)
+file_counters = defaultdict(int)
+counter_lock = threading.Lock()
+
+
+def get_file_type_prefix(filename):
+    """Determine file type prefix based on MIME type"""
+    mime_type, _ = mimetypes.guess_type(filename)
+
+    if mime_type:
+        if mime_type.startswith('text/'):
+            return 'TS'  # Text-Server
+        elif mime_type.startswith('video/'):
+            return 'VS'  # Video-Server
+        elif mime_type.startswith('image/'):
+            return 'IS'  # Image-Server
+        elif mime_type.startswith('audio/'):
+            return 'AS'  # Audio-Server
+        elif mime_type.startswith('application/pdf'):
+            return 'PS'  # PDF-Server
+        elif mime_type.startswith('application/'):
+            return 'DS'  # Document-Server
+
+    return 'FS'  # File-Server (generic)
+
+
+def generate_logical_filename(original_filename):
+    """Generate logical filename with type prefix and counter"""
+    # Get file extension
+    _, ext = os.path.splitext(original_filename)
+
+    # Get file type prefix
+    prefix = get_file_type_prefix(original_filename)
+
+    # Increment counter for this file type
+    with counter_lock:
+        file_counters[prefix] += 1
+        counter = file_counters[prefix]
+
+    # Generate logical name: TS001.txt, VS002.mp4, etc.
+    logical_name = f"{prefix}{counter:03d}{ext}"
+
+    return logical_name
+
+
+def get_existing_file_count():
+    """Count existing files by type to initialize counters"""
+    if not os.path.exists(SERVER_DATA_PATH):
+        return
+
+    with counter_lock:
+        for filename in os.listdir(SERVER_DATA_PATH):
+            # Extract prefix from existing files (e.g., TS001.txt -> TS)
+            if len(filename) >= 5:
+                prefix = filename[:2]
+                try:
+                    num = int(filename[2:5])
+                    if num > file_counters[prefix]:
+                        file_counters[prefix] = num
+                except ValueError:
+                    pass
 
 
 def authenticate_client(conn):
@@ -41,6 +109,31 @@ def authenticate_client(conn):
         return False, None
 
 
+def add_client_to_pool(addr, username):
+    """Add client to connection pool"""
+    with clients_lock:
+        active_clients[addr] = {
+            'username': username,
+            'connected_at': threading.current_thread().name
+        }
+        print(f"[CLIENT POOL] Added {username}@{addr}. Total clients: {len(active_clients)}")
+
+
+def remove_client_from_pool(addr):
+    """Remove client from connection pool"""
+    with clients_lock:
+        if addr in active_clients:
+            username = active_clients[addr]['username']
+            del active_clients[addr]
+            print(f"[CLIENT POOL] Removed {username}@{addr}. Total clients: {len(active_clients)}")
+
+
+def list_active_clients():
+    """Return list of active clients"""
+    with clients_lock:
+        return list(active_clients.items())
+
+
 def handle_upload(conn, addr):
     """Handle file upload from client"""
     try:
@@ -48,10 +141,12 @@ def handle_upload(conn, addr):
 
         # Receive file metadata
         data = conn.recv(SIZE).decode(FORMAT)
-        filename, filesize = data.split("@")
+        original_filename, filesize = data.split("@")
         filesize = int(filesize)
 
-        filepath = os.path.join(SERVER_DATA_PATH, filename)
+        # Generate logical filename
+        logical_filename = generate_logical_filename(original_filename)
+        filepath = os.path.join(SERVER_DATA_PATH, logical_filename)
 
         # Check if file exists
         if os.path.exists(filepath):
@@ -75,8 +170,8 @@ def handle_upload(conn, addr):
                 f.write(data)
                 received += len(data)
 
-        print(f"[{addr}] File '{filename}' uploaded successfully.")
-        conn.send(f"File '{filename}' uploaded successfully.".encode(FORMAT))
+        print(f"[{addr}] File '{original_filename}' uploaded as '{logical_filename}'.")
+        conn.send(f"File uploaded successfully as '{logical_filename}'.".encode(FORMAT))
     except Exception as e:
         print(f"[{addr}] Upload error: {e}")
         conn.send(f"ERROR: Upload failed - {e}".encode(FORMAT))
@@ -157,22 +252,41 @@ def handle_delete(conn, addr, filename):
 def handle_dir(conn, addr):
     """Handle directory listing request"""
     try:
-        # List all files and subdirectories
+        # List all files and subdirectories with file type info
         items = []
+        items.append(f"{'Filename':<20} {'Type':<10} {'Size (bytes)':<15}")
+        items.append("-" * 50)
+
         for root, dirs, files in os.walk(SERVER_DATA_PATH):
             level = root.replace(SERVER_DATA_PATH, '').count(os.sep)
             indent = ' ' * 2 * level
             rel_path = os.path.relpath(root, SERVER_DATA_PATH)
+
             if rel_path == '.':
-                items.append(f"[{SERVER_DATA_PATH}]")
+                items.append(f"\n[{SERVER_DATA_PATH}]")
             else:
                 items.append(f"{indent}[{os.path.basename(root)}/]")
 
             sub_indent = ' ' * 2 * (level + 1)
-            for file in files:
-                items.append(f"{sub_indent}{file}")
+            for file in sorted(files):
+                # Determine file type from logical naming
+                file_type = file[:2] if len(file) >= 2 else "??"
+                type_map = {
+                    'TS': 'Text',
+                    'VS': 'Video',
+                    'IS': 'Image',
+                    'AS': 'Audio',
+                    'PS': 'PDF',
+                    'DS': 'Document',
+                    'FS': 'File'
+                }
+                type_name = type_map.get(file_type, 'Unknown')
 
-        if not items:
+                filepath = os.path.join(root, file)
+                size = os.path.getsize(filepath)
+                items.append(f"{sub_indent}{file:<20} {type_name:<10} {size:<15}")
+
+        if len(items) <= 2:
             response = "Directory is empty."
         else:
             response = "\n".join(items)

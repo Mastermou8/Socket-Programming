@@ -4,7 +4,7 @@ import hashlib
 import getpass
 from analysis import NetworkAnalysis
 
-IP = "172.20.10.5"
+IP = "192.168.130.247"
 PORT = 4450
 ADDR = (IP, PORT)
 SIZE = 1024
