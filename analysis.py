@@ -1,17 +1,44 @@
 import os
-import socket
+import pandas as pd
+import time
 
-IP = "192.168.131.8"
-PORT = 4450
-ADDR = (IP, PORT)
-SIZE = 1024  ## byte .. buffer size
-FORMAT = "utf-8"
-SERVER_DATA_PATH = "server_data"
+class NetworkAnalysis:
+    def __init__(self, role, address):
+        self.role = role # To determine if it is a client or server
+        self.address = address # For the server IP and port
 
-def main():
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect(ADDR)
+    def start_record_time(self):
+        start_time = time.time()
+
+    def stop_record_time(self, start_time, bytes_transferred=0):
+        end_time = time.time()
+
+        if start_time is None:
+            print("Error: start time can't be None")
+            return
+
+        total_time = end_time - start_time
+        data_rate = bytes_transferred / total_time
+
+        self.stats_data.append({
+            'Timestamp': pd.Timestamp.now(),
+            'Role': self.role,
+            'Identifier': self.address,
+            'Duration_s': total_time,
+            'Bytes_Transferred': bytes_transferred,
+            'Data_Rate_Bps': data_rate,
+        })
+
+    def save_stats(self, filename = "network_stats.csv"):
+        df = pd.DataFrame()
+
+        # Check if file exists to determine if header should be written
+        if os.path.exists(filename):
+            # Append without header
+            df.to_csv(filename, mode='a', header=False, index=False)
+        else:
+            # Write with header
+            df.to_csv(filename, mode='w', header=True, index=False)
+        print(f"\n[{self.role}] Statistics saved to {filename}")
 
 
-if __name__ == "__main__":
-    main()
