@@ -1,5 +1,6 @@
 import os
 import socket
+from analysis import NetworkAnalysis as NA
 
 # IP = "192.168.1.101" #"localhost"
 IP = "192.168.131.8"
@@ -13,6 +14,7 @@ SERVER_DATA_PATH = "server_data"
 def main():
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client.connect(ADDR)
+    NA.start_record_time()
     while True:  ### multiple communications
         data = client.recv(SIZE).decode(FORMAT)
         cmd, msg = data.split("@")
@@ -34,6 +36,8 @@ def main():
             break
 
     print("Disconnected from the server.")
+    NA.stop_record_time()
+    NA.save_stats()
     client.close()  ## close the connection
 
 
