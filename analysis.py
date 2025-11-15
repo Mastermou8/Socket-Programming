@@ -46,4 +46,4 @@ class NetworkAnalysis:
             df.to_csv(filename, mode='w', header=True, index=False)
         print(f"\n[{self.role}] Statistics saved to {filename}")
 
-
+    

@@ -44,26 +44,31 @@ def get_file_type_prefix(filename):
 
 
 class FileServer:
-    def __init__(self, ip=IP, port=PORT, data_path=SERVER_DATA_PATH):
+    def __init__(self, ip=IP, port=PORT, data_path=SERVER_DATA_PATH, log_callback=None):
         self.ip = ip
         self.port = port
         self.addr = (ip, port)
         self.data_path = data_path
 
+        # New logging attribute
+        self.log_callback = log_callback
+
         self.server = None
         self.server_analyzer = NetworkAnalysis(role="Server", address=f"{self.ip}:{self.port}")
 
-        # Multithreading components
+        # --- MISSING ATTRIBUTES TO ADD (The "rest of __init__") ---
         self.shutdown_flag = threading.Event()
-        self.accept_thread = None
 
-        # State tracking
-        self.active_clients = {}
-        self.clients_lock = threading.Lock()
-        self.files_in_use = set()
-        self.files_lock = threading.Lock()
-        self.file_counters = defaultdict(int)
+        # Threading Locks and State
         self.counter_lock = threading.Lock()
+        self.clients_lock = threading.Lock()
+        self.files_lock = threading.Lock()
+
+        # Client Pool and Counters
+        self.active_clients = {}
+        self.file_counters = defaultdict(int)
+        self.files_in_use = set()
+        # -----------------------------------------------------------
 
         # Initial setup
         self._setup_data_directory()
@@ -77,21 +82,18 @@ class FileServer:
             os.makedirs(self.data_path)
 
     def _get_existing_file_count(self):
-        """Count existing files by type to initialize counters"""
-        if not os.path.exists(self.data_path):
-            return
-
-        with self.counter_lock:
+        # ...
+        with self.counter_lock:  # <-- **ERROR:** self.counter_lock is not defined
             for filename in os.listdir(self.data_path):
                 if len(filename) >= 5:
                     prefix = filename[:2]
                     try:
                         num = int(filename[2:5])
                         if num > self.file_counters[prefix]:
-                            self.file_counters[prefix] = num
+                            self.file_counters[prefix] = num # <-- **ERROR:** self.file_counters is not defined
                     except ValueError:
                         pass
-        print(f"[INIT] File counters initialized: {dict(self.file_counters)}")
+        self._log(f"[INIT] File counters initialized: {dict(self.file_counters)}")
 
     def _generate_logical_filename(self, original_filename):
         """Generate logical filename with type prefix and counter"""
@@ -113,7 +115,7 @@ class FileServer:
                 'username': username,
                 'connected_at': threading.current_thread().name
             }
-            print(f"[CLIENT POOL] Added {username}@{addr}. Total clients: {len(self.active_clients)}")
+            self._log(f"[CLIENT POOL] Added {username}@{addr}. Total clients: {len(self.active_clients)}")
 
     def _remove_client_from_pool(self, addr):
         """Remove client from connection pool"""
@@ -121,7 +123,7 @@ class FileServer:
             if addr in self.active_clients:
                 username = self.active_clients[addr]['username']
                 del self.active_clients[addr]
-                print(f"[CLIENT POOL] Removed {username}@{addr}. Total clients: {len(self.active_clients)}")
+                self._log(f"[CLIENT POOL] Removed {username}@{addr}. Total clients: {len(self.active_clients)}")
 
     def list_active_clients(self):
         """Return list of active clients"""
@@ -133,10 +135,10 @@ class FileServer:
     def start(self):
         """Initialize and start the server listener thread"""
         if self.server:
-            print("[ERROR] Server is already running.")
+            self._log("[ERROR] Server is already running.")
             return
 
-        print(f"[STARTING] Server is starting on {self.ip}:{self.port}...")
+        self._log(f"[STARTING] Server is starting on {self.ip}:{self.port}...")
 
         try:
             self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -149,21 +151,21 @@ class FileServer:
             self.accept_thread = threading.Thread(target=self._accept_clients_loop, name="AcceptThread")
             self.accept_thread.start()
 
-            print(f"[LISTENING] Server is listening on {self.ip}:{self.port}")
+            self._log(f"[LISTENING] Server is listening on {self.ip}:{self.port}")
             return True
 
         except Exception as e:
-            print(f"[FATAL ERROR] Could not start server: {e}")
+            self._log(f"[FATAL ERROR] Could not start server: {e}")
             self.server = None
             return False
 
     def stop(self):
         """Gracefully stop the server"""
         if not self.server:
-            print("[STOP] Server is not running.")
+            self._log("[STOP] Server is not running.")
             return
 
-        print("[STOPPING] Server shutdown initiated...")
+        self._log("[STOPPING] Server shutdown initiated...")
         self.shutdown_flag.set()
 
         # Give the accept thread a moment to finish its current loop
@@ -176,8 +178,8 @@ class FileServer:
         # Save statistics
         self.server_analyzer.save_stats(filename="server_network_stats.csv")
 
-        print("[SHUTDOWN] Server closed.")
-        print(f"[FINAL STATS] Total active clients at shutdown: {len(self.list_active_clients())}")
+        self._log("[SHUTDOWN] Server closed.")
+        self._log(f"[FINAL STATS] Total active clients at shutdown: {len(self.list_active_clients())}")
 
     def _accept_clients_loop(self):
         """The main loop for accepting new client connections"""
@@ -186,14 +188,26 @@ class FileServer:
                 conn, addr = self.server.accept()
                 thread = threading.Thread(target=self._handle_client, args=(conn, addr), name=f"Client-{addr[1]}")
                 thread.start()
-                print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 2}")
+                self._log(f"[ACTIVE CONNECTIONS] {threading.active_count() - 2}")
             except socket.timeout:
                 continue
             except Exception as e:
                 if not self.shutdown_flag.is_set():
-                    print(f"[ERROR in Accept Loop] {e}")
+                    self._log(f"[ERROR in Accept Loop] {e}")
 
     # --- Client Handler Methods (Mostly unchanged logic, now prefixed with _) ---
+
+    def _log(self, message):
+        """Internal logging method that calls the GUI callback or prints."""
+        timestamp = time.strftime("[%Y-%m-%d %H:%M:%S] [SERVER]")
+        full_message = f"{timestamp} {message}"
+
+        if self.log_callback:
+            # Send the message to the GUI's log widget
+            self.log_callback(full_message)
+        else:
+            # Fallback to console printing
+            self._log(full_message)
 
     def _authenticate_client(self, conn):
         """Authenticate client with username and hashed password"""
@@ -209,7 +223,7 @@ class FileServer:
                 conn.send("AUTH_FAILED".encode(FORMAT))
                 return False, None
         except Exception as e:
-            print(f"Authentication error: {e}")
+            self._log(f"Authentication error: {e}")
             return False, None
 
     def _handle_upload(self, conn, addr):
@@ -240,10 +254,10 @@ class FileServer:
                     f.write(data)
                     received += len(data)
 
-            print(f"[{addr}] File '{original_filename}' uploaded as '{logical_filename}'.")
+            self._log(f"[{addr}] File '{original_filename}' uploaded as '{logical_filename}'.")
             conn.send(f"File uploaded successfully as '{logical_filename}'.".encode(FORMAT))
         except Exception as e:
-            print(f"[{addr}] Upload error: {e}")
+            self._log(f"[{addr}] Upload error: {e}")
             conn.send(f"ERROR: Upload failed - {e}".encode(FORMAT))
 
     def _handle_download(self, conn, addr):
@@ -276,12 +290,12 @@ class FileServer:
                             break
                         conn.send(data)
 
-                print(f"[{addr}] File '{filename}' downloaded.")
+                self._log(f"[{addr}] File '{filename}' downloaded.")
             finally:
                 with self.files_lock:
                     self.files_in_use.discard(filename)
         except Exception as e:
-            print(f"[{addr}] Download error: {e}")
+            self._log(f"[{addr}] Download error: {e}")
             with self.files_lock:
                 self.files_in_use.discard(filename)
 
@@ -300,10 +314,10 @@ class FileServer:
                     return
 
             os.remove(filepath)
-            print(f"[{addr}] File '{filename}' deleted.")
+            self._log(f"[{addr}] File '{filename}' deleted.")
             conn.send(f"File '{filename}' deleted successfully.".encode(FORMAT))
         except Exception as e:
-            print(f"[{addr}] Delete error: {e}")
+            self._log(f"[{addr}] Delete error: {e}")
             conn.send(f"ERROR: Could not delete file - {e}".encode(FORMAT))
 
     def _handle_dir(self, conn, addr):
@@ -343,9 +357,9 @@ class FileServer:
                 response = "\n".join(items)
 
             conn.send(response.encode(FORMAT))
-            print(f"[{addr}] Directory listing sent.")
+            self._log(f"[{addr}] Directory listing sent.")
         except Exception as e:
-            print(f"[{addr}] Dir error: {e}")
+            self._log(f"[{addr}] Dir error: {e}")
             conn.send(f"ERROR: Could not list directory - {e}".encode(FORMAT))
 
     def _handle_subfolder(self, conn, addr, action, path):
@@ -358,7 +372,7 @@ class FileServer:
                     conn.send(f"ERROR: Folder '{path}' already exists.".encode(FORMAT))
                 else:
                     os.makedirs(full_path)
-                    print(f"[{addr}] Folder '{path}' created.")
+                    self._log(f"[{addr}] Folder '{path}' created.")
                     conn.send(f"Folder '{path}' created successfully.".encode(FORMAT))
 
             elif action == "DELETE":
@@ -368,7 +382,7 @@ class FileServer:
                     conn.send(f"ERROR: '{path}' is not a directory.".encode(FORMAT))
                 else:
                     os.rmdir(full_path)
-                    print(f"[{addr}] Folder '{path}' deleted.")
+                    self._log(f"[{addr}] Folder '{path}' deleted.")
                     conn.send(f"Folder '{path}' deleted successfully.".encode(FORMAT))
 
         except OSError as e:
@@ -377,12 +391,12 @@ class FileServer:
             else:
                 conn.send(f"ERROR: Folder operation failed - {e}".encode(FORMAT))
         except Exception as e:
-            print(f"[{addr}] Subfolder error: {e}")
+            self._log(f"[{addr}] Subfolder error: {e}")
             conn.send(f"ERROR: Operation failed - {e}".encode(FORMAT))
 
     def _handle_client(self, conn, addr):
         """Handle client connection in a separate thread"""
-        print(f"[NEW CONNECTION] {addr} connected.")
+        self._log(f"[NEW CONNECTION] {addr} connected.")
         session_start_time = self.server_analyzer.start_record_time()
         username = "N/A"  # Default username
 
@@ -394,15 +408,15 @@ class FileServer:
             self.server_analyzer.stop_record_time(start_time_auth, bytes_transferred=0, operation="SERVER_AUTH")
 
             if not authenticated:
-                print(f"[{addr}] Authentication failed.")
+                self._log(f"[{addr}] Authentication failed.")
                 conn.close()
                 return
 
-            print(f"[{addr}] User '{username}' authenticated.")
+            self._log(f"[{addr}] User '{username}' authenticated.")
             self._add_client_to_pool(addr, username)
 
         except Exception as e:
-            print(f"[{addr}] Connection error during auth: {e}")
+            self._log(f"[{addr}] Connection error during auth: {e}")
             conn.close()
             return
 
@@ -437,10 +451,10 @@ class FileServer:
                         self._handle_subfolder(conn, addr, action, path)
                         operation_type = "SERVER_SUBFOLDER_RESP"
                 elif data == "LOGOUT":
-                    print(f"[{addr}] Client logged out.")
+                    self._log(f"[{addr}] Client logged out.")
                     break
                 else:
-                    print(f"[{addr}] Unknown command: {data}")
+                    self._log(f"[{addr}] Unknown command: {data}")
                     conn.send(f"ERROR: Unknown command '{data}'".encode(FORMAT))
 
                 # Record the server-side processing time for the command
@@ -448,13 +462,13 @@ class FileServer:
                     self.server_analyzer.stop_record_time(start_time_op, bytes_transferred=0, operation=operation_type)
 
         except Exception as e:
-            print(f"[{addr}] Error: {e}")
+            self._log(f"[{addr}] Error: {e}")
         finally:
             self.server_analyzer.stop_record_time(session_start_time, bytes_transferred=0,
                                                   operation="SERVER_SESSION_TOTAL")
             self._remove_client_from_pool(addr)
             conn.close()
-            print(f"[{addr}] Disconnected.")
+            self._log(f"[{addr}] Disconnected.")
 
 
 # --- Main execution block for testing the server as a standalone application ---
