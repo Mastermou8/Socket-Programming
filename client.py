@@ -1,344 +1,278 @@
 import socket
 import os
 import hashlib
-import getpass
-from analysis import NetworkAnalysis
+from analysis import NetworkAnalysis as NA
+import time
+import getpass  # Kept for potential future console use, but GUI will handle input
 
-# Set a placeholder IP, it will be updated by user input
-IP = "127.0.0.1" 
+# --- CONSTANTS ---
+IP = "192.168.131.12"
 PORT = 4450
-ADDR = (IP, PORT)
 SIZE = 1024
 FORMAT = "utf-8"
-SERVER_DATA_PATH = "server_data"
+SERVER_DATA_PATH = "server_data"  # Not used directly in client class, but kept for context
 
 
-def hash_password(password):
-    """Hash password using SHA-256 for secure transmission"""
-    return hashlib.sha256(password.encode()).hexdigest()
+class FileClient:
+    def __init__(self, ip=IP, port=PORT, log_callback=None):
+        self.ip = ip
+        self.port = port
+        self.addr = (ip, port)
+        self.client_socket = None
+        self.analyzer = None
+        self.is_connected = False
+        self.is_authenticated = False
+        self.username = None
+        self.log_callback = log_callback  # Function passed by the UI for logging
 
+        self._log(f"Initialized with target server: {self.ip}:{self.port}")
 
-def send_file(client, filepath, analyzer):
-    """Send file to server"""
-    try:
-        #gather file information
-        filesize = os.path.getsize(filepath)
-        filename = os.path.basename(filepath)
+    # --- Internal Helpers ---
 
-        # Start timing for upload
-        start_time = analyzer.start_record_time()
-        bytes_transferred = 0
+    def _log(self, message):
+        """Internal logging method that calls the GUI callback or prints."""
+        timestamp = time.strftime("[%Y-%m-%d %H:%M:%S] [CLIENT]")
+        full_message = f"{timestamp} {message}"
 
-        # Send file data
-        client.send(f"{filename}@{filesize}".encode(FORMAT))
+        if self.log_callback:
+            # Send the message to the GUI's log widget
+            self.log_callback(full_message)
+        else:
+            # Fallback to console printing
+            print(full_message)
 
-        # wait until server respons
-        response = client.recv(SIZE).decode(FORMAT)
+    @staticmethod
+    def _hash_password(password):
+        """Hash password using SHA-256 for secure transmission."""
+        return hashlib.sha256(password.encode()).hexdigest()
 
-        if response == "EXISTS":
-            #overwrite files
-            overwrite = input("File already exists. Overwrite? (yes/no): ")
-            client.send(overwrite.encode(FORMAT))
-            #check if user said anything other than yes to cancel
-            if overwrite.lower() != "yes":
-                print("Upload cancelled.")
-                return
+    # --- Connection and Authentication ---
 
-            # Wait for final OK
-            response = client.recv(SIZE).decode(FORMAT)
-        #user confirmation
-        if response == "OK":
-            # Send data of the file
-            with open(filepath, "rb") as f:
-                while True:
-                    data = f.read(SIZE)
+    def connect(self):
+        """Creates socket, connects to server, and initializes analyzer."""
+        if self.is_connected:
+            self._log("Already connected.")
+            return True
+
+        self._log(f"Attempting to connect to {self.ip}:{self.port}...")
+
+        try:
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.settimeout(10)  # Set 10 second timeout
+            self.client_socket.connect(self.addr)
+            self.is_connected = True
+            self._log(f"Successfully connected to server at {self.ip}:{self.port}")
+
+            # Initialize network analyzer
+            self.analyzer = NA(role="Client", address=f"{self.ip}:{self.port}")
+
+            # Receive welcome message from server (if any)
+            try:
+                welcome_msg = self.client_socket.recv(SIZE).decode(FORMAT)
+                if "@" in welcome_msg:
+                    cmd, msg = welcome_msg.split("@", 1)
+                    if cmd == "OK":
+                        self._log(f"Server Welcome: {msg}")
+            except socket.timeout:
+                self._log("Warning: No welcome message received from server.")
+
+            return True
+
+        except ConnectionRefusedError:
+            self.is_connected = False
+            self._log(f"Error: Could not connect to server at {self.ip}:{self.port}")
+            return False
+        except Exception as e:
+            self.is_connected = False
+            self._log(f"Connection error: {e}")
+            return False
+
+    def authenticate(self, username, password):
+        """Handle client authentication with provided credentials."""
+        if not self.is_connected:
+            return "ERROR: Not connected to server."
+
+        try:
+            # Receive authentication prompt
+            msg = self.client_socket.recv(SIZE).decode(FORMAT)
+            self._log(f"Server Prompt: {msg}")
+
+            # Hash password before sending
+            hashed_password = self._hash_password(password)
+
+            # Send credentials
+            self.client_socket.send(f"{username}@{hashed_password}".encode(FORMAT))
+
+            # Receive authentication result
+            response = self.client_socket.recv(SIZE).decode(FORMAT)
+
+            if response == "AUTH_SUCCESS":
+                self.is_authenticated = True
+                self.username = username
+                self._log("Authentication successful!")
+                return "AUTH_SUCCESS"
+            else:
+                self._log("Authentication failed. Invalid credentials.")
+                return "AUTH_FAILED"
+        except Exception as e:
+            self._log(f"Authentication error: {e}")
+            self.disconnect()
+            return f"ERROR: {e}"
+
+    def disconnect(self):
+        """Logs out and closes the client socket."""
+        if self.is_connected:
+            try:
+                if self.is_authenticated:
+                    self.client_socket.send("LOGOUT".encode(FORMAT))
+                    self._log("Logging out...")
+
+                self.client_socket.close()
+                self._log("Disconnected from the server.")
+            except Exception as e:
+                self._log(f"Error during disconnect: {e}")
+            finally:
+                # Save statistics before closing
+                if self.analyzer:
+                    self.analyzer.save_stats(filename="client_network_stats.csv")
+
+        self.client_socket = None
+        self.is_connected = False
+        self.is_authenticated = False
+        self.username = None
+        return "DISCONNECTED"
+
+    # --- File Operations ---
+
+    def send_file(self, filepath, overwrite="no"):
+        """Send file to server. Returns status message."""
+        if not self.is_authenticated:
+            return "ERROR: Not authenticated."
+
+        self.client_socket.send("UPLOAD".encode(FORMAT))
+        self.client_socket.recv(SIZE)  # Wait for server READY signal
+
+        try:
+            filesize = os.path.getsize(filepath)
+            filename = os.path.basename(filepath)
+
+            start_time = self.analyzer.start_record_time()
+            bytes_transferred = 0
+
+            self.client_socket.send(f"{filename}@{filesize}".encode(FORMAT))
+
+            response = self.client_socket.recv(SIZE).decode(FORMAT)
+
+            if response == "EXISTS":
+                # overwrite is provided by the GUI now
+                self.client_socket.send(overwrite.encode(FORMAT))
+                if overwrite.lower() != "yes":
+                    self._log("Upload cancelled by user (file exists).")
+                    return "CANCELLED: File already exists on server."
+
+                response = self.client_socket.recv(SIZE).decode(FORMAT)
+
+            if response == "OK":
+                with open(filepath, "rb") as f:
+                    while True:
+                        data = f.read(SIZE)
+                        if not data:
+                            break
+                        self.client_socket.send(data)
+                        bytes_transferred += len(data)
+
+                msg = self.client_socket.recv(SIZE).decode(FORMAT)
+                self._log(msg)
+
+                self.analyzer.stop_record_time(start_time, bytes_transferred, operation="CLIENT_UPLOAD")
+                return f"SUCCESS: {msg}"
+
+            return f"ERROR: Unexpected server response during upload: {response}"
+
+        except FileNotFoundError:
+            return f"ERROR: File '{filepath}' not found."
+        except Exception as e:
+            self._log(f"Error uploading file: {e}")
+            return f"ERROR: Upload failed - {e}"
+
+    def receive_file(self, filename):
+        """Download file from server. Returns status message."""
+        if not self.is_authenticated:
+            return "ERROR: Not authenticated."
+
+        self.client_socket.send("DOWNLOAD".encode(FORMAT))
+        self.client_socket.recv(SIZE)  # Wait for server READY signal
+
+        try:
+            start_time = self.analyzer.start_record_time()
+            self.client_socket.send(filename.encode(FORMAT))
+
+            response = self.client_socket.recv(SIZE).decode(FORMAT)
+
+            if response.startswith("ERROR"):
+                self._log(response)
+                return response
+
+            filesize = int(response)
+            self.client_socket.send("READY".encode(FORMAT))
+
+            # Use filedialog.asksaveasfilename in the GUI, but here we use a simple path
+            save_path = os.path.join(os.getcwd(), filename)
+
+            bytes_transferred = 0
+            with open(save_path, "wb") as f:
+                received = 0
+                while received < filesize:
+                    data = self.client_socket.recv(SIZE)
                     if not data:
                         break
-                    client.send(data)
+                    f.write(data)
+                    received += len(data)
                     bytes_transferred += len(data)
 
-            # Receive confirmation
-            msg = client.recv(SIZE).decode(FORMAT)
-            print(msg)
-
-            # Stop timing and record stats
-            analyzer.stop_record_time(start_time, bytes_transferred, operation="UPLOAD")
-
-    except FileNotFoundError:
-        print(f"Error: File '{filepath}' not found.")
-    except Exception as e:
-        print(f"Error uploading file: {e}")
-
-
-def receive_file(client, filename, analyzer):
-    """Download file from server"""
-    try:
-        # Start timing for download
-        start_time = analyzer.start_record_time()
-
-        # Send filename
-        client.send(filename.encode(FORMAT))
-
-        # Receive response
-        response = client.recv(SIZE).decode(FORMAT)
-
-        if response.startswith("ERROR"):
-            print(response)
-            # Record operation time (failed attempt)
-            analyzer.stop_record_time(start_time, bytes_transferred=0, operation="DOWNLOAD_FAIL")
-            return
-
-        # Parse file size
-        filesize = int(response)
-
-        # Send ready signal
-        client.send("READY".encode(FORMAT))
-
-        # Receive file data
-        bytes_transferred = 0
-        with open(filename, "wb") as f:
-            received = 0
-            while received < filesize:
-                data = client.recv(SIZE)
-                if not data:
-                    break
-                f.write(data)
-                received += len(data)
-                bytes_transferred += len(data)
-
-        print(f"File '{filename}' downloaded successfully.")
-
-        # Stop timing and record stats
-        analyzer.stop_record_time(start_time, bytes_transferred, operation="DOWNLOAD")
-
-    except Exception as e:
-        print(f"Error downloading file: {e}")
-
-
-def authenticate(client, analyzer):
-    """Handle client authentication with password hashing and timing"""
-    try:
-        # NEW: Start timing for system response time (Authentication)
-        start_time = analyzer.start_record_time()
-
-        # Receive authentication prompt
-        msg = client.recv(SIZE).decode(FORMAT)
-        print(msg)
-
-        username = input("Username: ")
-        # Use getpass.getpass() for hidden input
-        password = getpass.getpass("Password: ") 
-
-        # Hash password before sending
-        hashed_password = hash_password(password)
-
-        # Send credentials
-        client.send(f"{username}@{hashed_password}".encode(FORMAT))
-
-        # Receive authentication result
-        response = client.recv(SIZE).decode(FORMAT)
-
-        # NEW: Record operation time (System Response Time for AUTH)
-        analyzer.stop_record_time(start_time, bytes_transferred=0, operation="AUTH")
-
-        if response == "AUTH_SUCCESS":
-            print("Authentication successful!")
-            return True
-        else:
-            print("Authentication failed. Invalid credentials.")
-            return False
-    except Exception as e:
-        print(f"Authentication error: {e}")
-        return False
-
-
-def handle_delete(client, filename, analyzer):
-    """Handle delete command with timing"""
-    start_time = analyzer.start_record_time()
-
-    client.send(f"DELETE@{filename}".encode(FORMAT))
-
-    # Receive response
-    response = client.recv(SIZE).decode(FORMAT)
-    print(response)
-
-    # Record operation time (no significant bytes transferred)
-    analyzer.stop_record_time(start_time, bytes_transferred=0, operation="DELETE")
-
-
-def handle_dir(client, analyzer):
-    """Handle directory listing with timing"""
-    start_time = analyzer.start_record_time()
-
-    client.send("DIR".encode(FORMAT))
-
-    # Receive directory listing
-    response = client.recv(SIZE).decode(FORMAT)
-    print("\n" + response)
-
-    # Record operation time
-    analyzer.stop_record_time(start_time, bytes_transferred=len(response.encode(FORMAT)), operation="DIR")
-
-
-def handle_subfolder(client, action, path, analyzer):
-    """Handle subfolder operations with timing"""
-    start_time = analyzer.start_record_time()
-
-    client.send(f"SUBFOLDER@{action}@{path}".encode(FORMAT))
-
-    # Receive response
-    response = client.recv(SIZE).decode(FORMAT)
-    print(response)
-
-    # Record operation time
-    analyzer.stop_record_time(start_time, bytes_transferred=0, operation=f"SUBFOLDER_{action}")
-
-
-def main():
-    global IP, ADDR
-
-    # Get IP first and update ADDR
-    server_ip = input("Enter Server IP (e.g., 192.168.130.121): ").strip()
-    if server_ip:
-        IP = server_ip
-        ADDR = (IP, PORT)
-
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.settimeout(10)  # Set 10 second timeout
-    network_analyzer = None
-
-    try:
-        print(f"Attempting to connect to {IP}:{PORT}...")
-        client.connect(ADDR)
-        print(f"Connected to server at {IP}:{PORT}")
-
-        # Initialize network analyzer
-        network_analyzer = NetworkAnalysis(role="Client", address=f"{IP}:{PORT}")
-
-        # Receive welcome message from server (if any)
-        try:
-            welcome_msg = client.recv(SIZE).decode(FORMAT)
-            if "@" in welcome_msg:
-                cmd, msg = welcome_msg.split("@", 1)
-                if cmd == "OK":
-                    print(f"{msg}")
-        except socket.timeout:
-            print("Warning: No welcome message received from server")
-
-        # Authenticate
-        if not authenticate(client, network_analyzer): # PASS ANALYZER
-            client.close()
-            return
-
-        while True:
-            # Display menu
-            print("\n--- File Operations Menu ---")
-            print("UPLOAD [filepath] - Upload file to server")
-            print("DOWNLOAD [filename] - Download file from server")
-            print("DELETE [filename] - Delete file from server")
-            print("DIR - List files and directories")
-            print("SUBFOLDER CREATE [path] - Create subfolder")
-            print("SUBFOLDER DELETE [path] - Delete subfolder")
-            print("LOGOUT - Disconnect from server")
-
-            data = input("\n> ").strip()
-
-            if not data:
-                continue
-
-            parts = data.split(" ", 1)
-            cmd = parts[0].upper()
-
-            if cmd == "UPLOAD":
-                if len(parts) < 2:
-                    print("Usage: UPLOAD [filepath]")
-                    continue
-
-                filepath = parts[1].strip()
-                client.send("UPLOAD".encode(FORMAT))
-
-                # Wait for ready signal
-                client.recv(SIZE)
-
-                send_file(client, filepath, network_analyzer)
-
-            elif cmd == "DOWNLOAD":
-                if len(parts) < 2:
-                    print("Usage: DOWNLOAD [filename]")
-                    continue
-
-                filename = parts[1].strip()
-                client.send("DOWNLOAD".encode(FORMAT))
-
-                # Wait for ready signal
-                client.recv(SIZE)
-
-                receive_file(client, filename, network_analyzer)
-
-            elif cmd == "DELETE":
-                if len(parts) < 2:
-                    print("Usage: DELETE [filename]")
-                    continue
-
-                filename = parts[1].strip()
-                handle_delete(client, filename, network_analyzer)
-
-            elif cmd == "DIR":
-                handle_dir(client, network_analyzer)
-
-            elif cmd == "SUBFOLDER":
-                if len(parts) < 2:
-                    print("Usage: SUBFOLDER {CREATE|DELETE} [path]")
-                    continue
-
-                sub_parts = parts[1].split(" ", 1)
-                if len(sub_parts) < 2:
-                    print("Usage: SUBFOLDER {CREATE|DELETE} [path]")
-                    continue
-
-                action = sub_parts[0].upper()
-                path = sub_parts[1].strip()
-
-                if action not in ["CREATE", "DELETE"]:
-                    print("Action must be CREATE or DELETE")
-                    continue
-
-                handle_subfolder(client, action, path, network_analyzer)
-
-            elif cmd == "LOGOUT":
-                client.send("LOGOUT".encode(FORMAT))
-                print("Logging out...")
-                break
-            
-            # Allow admin to use the shutdown command
-            elif cmd == "SHUTDOWN":
-                # The server handle_client checks if the user is 'admin'
-                client.send("SHUTDOWN".encode(FORMAT))
-                
-                # Receive server response
-                response = client.recv(SIZE).decode(FORMAT)
-                if response.startswith("OK"):
-                    print(response.split("@")[1])
-                else:
-                    print("Shutdown command failed or rejected by server.")
-                break # Break loop after sending shutdown
-
-            else:
-                print(f"Unknown command: {cmd}")
-
-    except ConnectionRefusedError:
-        print(f"Error: Could not connect to server at {IP}:{PORT}")
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        print("Disconnected from the server.")
-
-        # Save statistics before closing (client stats are saved to network_stats.csv)
-        if network_analyzer:
-            network_analyzer.save_stats()
-
-        client.close()
-
-
-if __name__ == "__main__":
-    main()
+            self._log(f"File '{filename}' downloaded successfully to {save_path}.")
+
+            self.analyzer.stop_record_time(start_time, bytes_transferred, operation="CLIENT_DOWNLOAD")
+            return f"SUCCESS: File '{filename}' downloaded successfully to {os.getcwd()}."
+
+        except Exception as e:
+            self._log(f"Error downloading file: {e}")
+            return f"ERROR: Download failed - {e}"
+
+    def handle_delete(self, filename):
+        """Handle delete command. Returns server response."""
+        if not self.is_authenticated:
+            return "ERROR: Not authenticated."
+
+        start_time = self.analyzer.start_record_time()
+        self.client_socket.send(f"DELETE@{filename}".encode(FORMAT))
+        response = self.client_socket.recv(SIZE).decode(FORMAT)
+        self._log(response)
+        self.analyzer.stop_record_time(start_time, 0, operation="CLIENT_DELETE")
+        return response
+
+    def handle_dir(self):
+        """Handle directory listing. Returns directory listing string."""
+        if not self.is_authenticated:
+            return "ERROR: Not authenticated."
+
+        start_time = self.analyzer.start_record_time()
+        self.client_socket.send("DIR".encode(FORMAT))
+        response = self.client_socket.recv(SIZE).decode(FORMAT)
+        self._log("\n--- Server Directory Listing ---")
+        self._log(response)
+
+        self.analyzer.stop_record_time(start_time, len(response.encode(FORMAT)), operation="CLIENT_DIR")
+        return response
+
+    def handle_subfolder(self, action, path):
+        """Handle subfolder operations. Returns server response."""
+        if not self.is_authenticated:
+            return "ERROR: Not authenticated."
+
+        start_time = self.analyzer.start_record_time()
+        self.client_socket.send(f"SUBFOLDER@{action}@{path}".encode(FORMAT))
+        response = self.client_socket.recv(SIZE).decode(FORMAT)
+        self._log(response)
+        self.analyzer.stop_record_time(start_time, 0, operation="CLIENT_SUBFOLDER")
+        return response
