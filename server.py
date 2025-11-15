@@ -4,16 +4,13 @@ import hashlib
 import threading
 import mimetypes
 from collections import defaultdict
-from analysis import NetworkAnalysis
-import sys
 
-IP = "192.168.130.247"
+IP = "192.168.131.8"
 PORT = 4450
 ADDR = (IP, PORT)
 SIZE = 1024
 FORMAT = "utf-8"
 SERVER_DATA_PATH = "server_data"
-SERVER_TERMINATE_FLAG = threading.Event()
 
 # Simple user database (username: hashed_password)
 # Password for both users is "password123" (hashed)
@@ -392,37 +389,6 @@ def handle_client(conn, addr):
         conn.close()
         print(f"[{addr}] Disconnected.")
 
-def input_handler():
-    """Handles console input for termination command."""
-    while not SERVER_TERMINATE_FLAG.is_set():
-        try:
-            # Use sys.stdin.readline to handle input potentially more cleanly than input()
-            data = sys.stdin.readline().strip()
-            if data: # Only process if there's actual input
-                parts = data.split(" ", 1)
-                cmd = parts[0].upper()
-                if cmd == "TERMINATE":
-                    print("\n[COMMAND RECEIVED] TERMINATE. Server is shutting down...")
-                    SERVER_TERMINATE_FLAG.set()
-                    # To unblock server.accept() immediately, we can try to connect to the server itself
-                    # This is a common trick to break the accept() block.
-                    try:
-                        stopper_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        stopper_socket.connect(ADDR)
-                        stopper_socket.close()
-                    except ConnectionRefusedError:
-                        # This might happen if the server closes before the connect, which is fine
-                        pass
-                    break
-            # Note: The input prompt is now only printed once in the main function.
-        except EOFError:
-            # Handle Ctrl-D (EOF) if necessary
-            SERVER_TERMINATE_FLAG.set()
-            break
-        except Exception:
-            # General exception handling for input
-            pass
-
 
 def main():
     # Create server data directory if it doesn't exist
@@ -434,54 +400,19 @@ def main():
     server.bind(ADDR)
     server.listen()
     print(f"[LISTENING] Server is listening on {IP}:{PORT}")
-    print("Type TERMINATE and press Enter to stop the server\n")
-    NA = NetworkAnalysis(role="Server", address=f"{IP}:{PORT}")
-    NA.start_record_time()
-
-    # Start the input handler thread
-    input_thread = threading.Thread(target=input_handler)
-    input_thread.daemon = True  # Allows program to exit even if thread is running
-    input_thread.start()
+    print("Press Ctrl+C to stop the server\n")
 
     try:
-        while not SERVER_TERMINATE_FLAG.is_set():  # Check flag instead of `while True`
-            try:
-                # Use a timeout so the loop can check the flag periodically
-                server.settimeout(0.5)
-                conn, addr = server.accept()
-                server.settimeout(None)  # Reset timeout after a successful accept
-
-                thread = threading.Thread(target=handle_client, args=(conn, addr))
-                thread.start()
-                print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 2}")  # -2 for main and input threads
-
-            except socket.timeout:
-                # This is expected if no connection comes in before the timeout
-                continue
-
-            # The original input handling code is now REMOVED from the main loop:
-            # data = input("\n> ").strip()
-            # parts = data.split(" ", 1)
-            # cmd = parts[0].upper()
-            # if cmd == "TERMINATE":
-            #     break
-
-    except Exception as e:
-        # Handle exceptions that might occur outside of the accept() call
-        print(f"[ERROR] An unexpected error occurred: {e}")
-
+        while True:
+            conn, addr = server.accept()
+            thread = threading.Thread(target=handle_client, args=(conn, addr))
+            thread.start()
+            print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
+    except KeyboardInterrupt:
+        print("\n[STOPPING] Server is shutting down...")
     finally:
-        # Ensure the flag is set in case of an error or unhandled exception
-        SERVER_TERMINATE_FLAG.set()
-        print("[SHUTDOWN] Performing final cleanup...")
-
-        # Wait for the input thread to finish if it hasn't already (optional)
-        # input_thread.join(timeout=1)
-
-        NA.stop_record_time()
-        NA.save_stats()
         server.close()
-        print("[STOPPED] Server has fully shut down.")
+
 
 if __name__ == "__main__":
     main()
