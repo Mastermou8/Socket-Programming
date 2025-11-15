@@ -207,7 +207,7 @@ class FileServer:
             self.log_callback(full_message)
         else:
             # Fallback to console printing
-            self._log(full_message)
+            print(full_message)
 
     def _authenticate_client(self, conn):
         """Authenticate client with username and hashed password"""
