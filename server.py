@@ -84,8 +84,9 @@ def get_existing_file_count():
         return
     #Counter lock prevents issues with multitherading
     with counter_lock:
+        #Get a list of all the files and folders inside the directory
         for filename in os.listdir(SERVER_DATA_PATH):
-            # Extract prefix from existing files (e.g., TS001.txt -> TS)
+            # Extract prefix from the existing files
             if len(filename) >= 5:
                 prefix = filename[:2]
                 try:
@@ -99,8 +100,10 @@ def get_existing_file_count():
 def authenticate_client(conn):
     """Authenticate client with username and hashed password"""
     try:
+        #promts for authentication
         conn.send("Please authenticate to continue.".encode(FORMAT))
-
+        #recives the credentials provided by user and checks
+        #either accepts or declines
         credentials = conn.recv(SIZE).decode(FORMAT)
         username, hashed_password = credentials.split("@")
 
@@ -117,17 +120,21 @@ def authenticate_client(conn):
 
 def add_client_to_pool(addr, username):
     """Add client to connection pool"""
+    #client lock to prevent corrupt data or other issues from simultaneous connections
     with clients_lock:
         active_clients[addr] = {
             'username': username,
             'connected_at': threading.current_thread().name
         }
+        #show added client and current client count
         print(f"[CLIENT POOL] Added {username}@{addr}. Total clients: {len(active_clients)}")
 
 
 def remove_client_from_pool(addr):
     """Remove client from connection pool"""
+    #same thing with all the other locks lol
     with clients_lock:
+        #show who left and client count
         if addr in active_clients:
             username = active_clients[addr]['username']
             del active_clients[addr]
@@ -136,7 +143,9 @@ def remove_client_from_pool(addr):
 
 def list_active_clients():
     """Return list of active clients"""
+    #same thing lol
     with clients_lock:
+        #returns a list of active clients
         return list(active_clients.items())
 
 
@@ -148,20 +157,20 @@ def handle_upload(conn, addr):
     try:
         conn.send("READY".encode(FORMAT))
 
-        # Receive file metadata
+        # Receive the file data
         data = conn.recv(SIZE).decode(FORMAT)
         original_filename, filesize = data.split("@")
         filesize = int(filesize)
 
-        # Generate logical filename
+        # Generate the filename
         logical_filename = generate_logical_filename(original_filename)
         filepath = os.path.join(SERVER_DATA_PATH, logical_filename)
 
-        # Check if file exists
+        # Check if file the exists
         if os.path.exists(filepath):
             conn.send("EXISTS".encode(FORMAT))
 
-            # Wait for client decision
+            # Wait for the user choice
             overwrite = conn.recv(SIZE).decode(FORMAT)
 
             if overwrite.lower() != "yes":
@@ -169,7 +178,7 @@ def handle_upload(conn, addr):
 
         conn.send("OK".encode(FORMAT))
 
-        # Receive file data
+        # Receive the file data
         with open(filepath, "wb") as f:
             received = 0
             while received < filesize:
@@ -191,16 +200,16 @@ def handle_download(conn, addr):
     try:
         conn.send("READY".encode(FORMAT))
 
-        # Receive filename
+        # Receive the filename
         filename = conn.recv(SIZE).decode(FORMAT)
         filepath = os.path.join(SERVER_DATA_PATH, filename)
 
-        # Check if file exists
+        # Check if the file exists
         if not os.path.exists(filepath):
             conn.send(f"ERROR: File '{filename}' not found.".encode(FORMAT))
             return
 
-        # Check if file is being processed
+        # Check if the  file is being processed
         with files_lock:
             if filename in files_in_use:
                 conn.send(f"ERROR: File '{filename}' is currently being processed.".encode(FORMAT))
@@ -208,14 +217,14 @@ def handle_download(conn, addr):
             files_in_use.add(filename)
 
         try:
-            # Send file size
+            # Send the size of file
             filesize = os.path.getsize(filepath)
             conn.send(str(filesize).encode(FORMAT))
 
-            # Wait for ready signal
+            # Wait for  signal
             conn.recv(SIZE)
 
-            # Send file data
+            # Send the file data
             with open(filepath, "rb") as f:
                 while True:
                     data = f.read(SIZE)
@@ -236,6 +245,7 @@ def handle_download(conn, addr):
 def handle_delete(conn, addr, filename):
     """Handle file deletion request"""
     try:
+        #check if the file exist
         filepath = os.path.join(SERVER_DATA_PATH, filename)
 
         # Check if file exists
@@ -265,7 +275,7 @@ def handle_dir(conn, addr):
         items = []
         items.append(f"{'Filename':<20} {'Type':<10} {'Size (bytes)':<15}")
         items.append("-" * 50)
-
+        #traverse the directory
         for root, dirs, files in os.walk(SERVER_DATA_PATH):
             level = root.replace(SERVER_DATA_PATH, '').count(os.sep)
             indent = ' ' * 2 * level
@@ -275,7 +285,7 @@ def handle_dir(conn, addr):
                 items.append(f"\n[{SERVER_DATA_PATH}]")
             else:
                 items.append(f"{indent}[{os.path.basename(root)}/]")
-
+        #process the files
             sub_indent = ' ' * 2 * (level + 1)
             for file in sorted(files):
                 # Determine file type from logical naming
@@ -294,7 +304,7 @@ def handle_dir(conn, addr):
                 filepath = os.path.join(root, file)
                 size = os.path.getsize(filepath)
                 items.append(f"{sub_indent}{file:<20} {type_name:<10} {size:<15}")
-
+        #format and send the response
         if len(items) <= 2:
             response = "Directory is empty."
         else:
@@ -310,8 +320,9 @@ def handle_dir(conn, addr):
 def handle_subfolder(conn, addr, action, path):
     """Handle subfolder creation/deletion"""
     try:
+        #Set up the path
         full_path = os.path.join(SERVER_DATA_PATH, path)
-
+        #create a folder
         if action == "CREATE":
             if os.path.exists(full_path):
                 conn.send(f"ERROR: Folder '{path}' already exists.".encode(FORMAT))
@@ -319,7 +330,7 @@ def handle_subfolder(conn, addr, action, path):
                 os.makedirs(full_path)
                 print(f"[{addr}] Folder '{path}' created.")
                 conn.send(f"Folder '{path}' created successfully.".encode(FORMAT))
-
+        #Delete folder
         elif action == "DELETE":
             if not os.path.exists(full_path):
                 conn.send(f"ERROR: Folder '{path}' not found.".encode(FORMAT))
@@ -329,6 +340,7 @@ def handle_subfolder(conn, addr, action, path):
                 os.rmdir(full_path)
                 print(f"[{addr}] Folder '{path}' deleted.")
                 conn.send(f"Folder '{path}' deleted successfully.".encode(FORMAT))
+                #exception errors
     except OSError as e:
         if action == "DELETE":
             conn.send(f"ERROR: Cannot delete folder (may not be empty) - {e}".encode(FORMAT))
@@ -347,17 +359,17 @@ def handle_client(conn, addr, shutdown_flag=None, server_analyzer=None):
     session_start_time = server_analyzer.start_record_time()
 
     try:
-        # Send welcome message
+        # Send a welcome message
         conn.send("OK@Welcome to the server".encode(FORMAT))
 
-        # Authenticate client
+        # Authenticate the client
         start_time_auth = server_analyzer.start_record_time()  # Start timing for authentication
 
         authenticated, username = authenticate_client(conn)
 
-        # Record server-side processing time for authentication
+        # Record the server-side processing time for authentication
         server_analyzer.stop_record_time(start_time_auth, bytes_transferred=0, operation="SERVER_AUTH")
-
+        #close connection if user is not authenticated
         if not authenticated:
             print(f"[{addr}] Authentication failed.")
             conn.close()
@@ -365,7 +377,7 @@ def handle_client(conn, addr, shutdown_flag=None, server_analyzer=None):
 
         print(f"[{addr}] User '{username}' authenticated.")
 
-        # Add client to connection pool
+        # Add the client to connection pool
         add_client_to_pool(addr, username)
 
     except Exception as e:
@@ -380,14 +392,14 @@ def handle_client(conn, addr, shutdown_flag=None, server_analyzer=None):
 
             if not data:
                 break
-
+            #we tried to make it cool
             # Check for shutdown command (admin only)
-            if data == "SHUTDOWN" and username == "admin":
-                print(f"[{addr}] Admin initiated server shutdown.")
-                conn.send("OK@Server shutting down...".encode(FORMAT))
-                if shutdown_flag:
-                    shutdown_flag.set()
-                break
+            #if data == "SHUTDOWN" and username == "admin":
+            #    print(f"[{addr}] Admin initiated server shutdown.")
+            #    conn.send("OK@Server shutting down...".encode(FORMAT))
+            #    if shutdown_flag:
+            #        shutdown_flag.set()
+            #    break
 
             # --- Command Handling with Server Response Time Recording ---
 
@@ -437,11 +449,11 @@ def handle_client(conn, addr, shutdown_flag=None, server_analyzer=None):
 
 
 def main():
-    # Create server data directory if it doesn't exist
+    # Create the server data directory if it doesn't exist
     if not os.path.exists(SERVER_DATA_PATH):
         os.makedirs(SERVER_DATA_PATH)
 
-    # Initialize file counters from existing files
+    # Initialize the file counters from existing files
     get_existing_file_count()
 
     print("[STARTING] Server is starting...")
@@ -451,7 +463,7 @@ def main():
     server.listen()
     server.settimeout(1.0)  # Set timeout to check for shutdown
 
-    # Initialize server-side network analyzer
+    # Initialize the server-side network analyzer
     server_analyzer = NetworkAnalysis(role="Server", address=f"{IP}:{PORT}")  # NEW: Initialize Analyzer
 
     print(f"[LISTENING] Server is listening on {IP}:{PORT}")
@@ -488,7 +500,7 @@ def main():
 
     # --- CORE SHUTDOWN LOGIC ---
     try:
-        # Keep the main thread alive, waiting for the shutdown flag to be set
+        # Keep the main thread alive on loop, waiting for the shutdown flag to be set
         while not shutdown_flag.is_set():
             accept_thread.join(timeout=0.1)  # Check periodically
 
@@ -497,12 +509,12 @@ def main():
         shutdown_flag.set()
 
     finally:
-        # If the flag was set (by admin or Ctrl+C), wait for the accept thread to finish
+        # If the flag was set (by clearly not the admin cause it sucks admin or Ctrl+C), wait for the accept thread to finish
         accept_thread.join(timeout=2)
 
         # Close the server socket
         server.close()
-        # Save server statistics
+        # Save the server statistics
         server_analyzer.save_stats(filename="server_network_stats.csv")  # NEW: Save Server Stats
 
         print(f"[FINAL STATS] Total active clients at shutdown: {len(list_active_clients())}")
