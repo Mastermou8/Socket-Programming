@@ -12,7 +12,7 @@ class NetworkAnalysis:
         start_time = time.time()
         return start_time
 
-    def stop_record_time(self, start_time, bytes_transferred=0):
+    def stop_record_time(self, start_time, bytes_transferred=0, operation="TRANSFER"):
         end_time = time.time()
 
         if start_time is None:
@@ -20,6 +20,7 @@ class NetworkAnalysis:
             return
 
         total_time = end_time - start_time
+        data_rate = 0
         if total_time > 0:
             data_rate = bytes_transferred / total_time
 
@@ -27,6 +28,7 @@ class NetworkAnalysis:
             'Timestamp': pd.Timestamp.now(),
             'Role': self.role,
             'Address': self.address,
+            'Operation': operation,
             'Duration_s': total_time,
             'Bytes_Transferred': bytes_transferred,
             'Data_Rate': data_rate,

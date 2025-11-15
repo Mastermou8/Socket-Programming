@@ -1,11 +1,14 @@
 import socket
 import os
+import socket
+import os
 import hashlib
 import threading
 import mimetypes
 from collections import defaultdict
+from analysis import NetworkAnalysis  # NEW IMPORT
 
-IP = "192.168.131.8"
+IP = "192.168.130.121"
 PORT = 4450
 ADDR = (IP, PORT)
 SIZE = 1024
@@ -31,11 +34,12 @@ files_lock = threading.Lock()
 file_counters = defaultdict(int)
 counter_lock = threading.Lock()
 
-
+#Determine and sort the file
 def get_file_type_prefix(filename):
     """Determine file type prefix based on MIME type"""
+    #find the file type
     mime_type, _ = mimetypes.guess_type(filename)
-
+    #Assign the file type to a 2 letter prefix
     if mime_type:
         if mime_type.startswith('text/'):
             return 'TS'  # Text-Server
@@ -55,18 +59,19 @@ def get_file_type_prefix(filename):
 
 def generate_logical_filename(original_filename):
     """Generate logical filename with type prefix and counter"""
-    # Get file extension
+    # Get the file extension
     _, ext = os.path.splitext(original_filename)
 
-    # Get file type prefix
+    # Get the file prefix using function for it
     prefix = get_file_type_prefix(original_filename)
 
-    # Increment counter for this file type
+    # Increment the counter for the file type
+    #counter lock avoids issues with multiple clients
     with counter_lock:
         file_counters[prefix] += 1
         counter = file_counters[prefix]
 
-    # Generate logical name: TS001.txt, VS002.mp4, etc.
+    # Generate  name: TS001.txt, VS002.mp4, etc.
     logical_name = f"{prefix}{counter:03d}{ext}"
 
     return logical_name
@@ -74,9 +79,10 @@ def generate_logical_filename(original_filename):
 
 def get_existing_file_count():
     """Count existing files by type to initialize counters"""
+    #check for the server directory
     if not os.path.exists(SERVER_DATA_PATH):
         return
-
+    #Counter lock prevents issues with multitherading
     with counter_lock:
         for filename in os.listdir(SERVER_DATA_PATH):
             # Extract prefix from existing files (e.g., TS001.txt -> TS)
@@ -136,6 +142,9 @@ def list_active_clients():
 
 def handle_upload(conn, addr):
     """Handle file upload from client"""
+    # NOTE: The server does not record file transfer data rates here,
+    # as the client is responsible for sending byte count updates.
+    # The server only records the overall response time for the command.
     try:
         conn.send("READY".encode(FORMAT))
 
@@ -330,16 +339,24 @@ def handle_subfolder(conn, addr, action, path):
         conn.send(f"ERROR: Operation failed - {e}".encode(FORMAT))
 
 
-def handle_client(conn, addr):
+def handle_client(conn, addr, shutdown_flag=None, server_analyzer=None):
     """Handle client connection"""
     print(f"[NEW CONNECTION] {addr} connected.")
+
+    # Start timing for the entire client session
+    session_start_time = server_analyzer.start_record_time()
 
     try:
         # Send welcome message
         conn.send("OK@Welcome to the server".encode(FORMAT))
 
         # Authenticate client
+        start_time_auth = server_analyzer.start_record_time()  # Start timing for authentication
+
         authenticated, username = authenticate_client(conn)
+
+        # Record server-side processing time for authentication
+        server_analyzer.stop_record_time(start_time_auth, bytes_transferred=0, operation="SERVER_AUTH")
 
         if not authenticated:
             print(f"[{addr}] Authentication failed.")
@@ -347,6 +364,10 @@ def handle_client(conn, addr):
             return
 
         print(f"[{addr}] User '{username}' authenticated.")
+
+        # Add client to connection pool
+        add_client_to_pool(addr, username)
+
     except Exception as e:
         print(f"[{addr}] Connection error during auth: {e}")
         conn.close()
@@ -360,24 +381,44 @@ def handle_client(conn, addr):
             if not data:
                 break
 
+            # Check for shutdown command (admin only)
+            if data == "SHUTDOWN" and username == "admin":
+                print(f"[{addr}] Admin initiated server shutdown.")
+                conn.send("OK@Server shutting down...".encode(FORMAT))
+                if shutdown_flag:
+                    shutdown_flag.set()
+                break
+
+            # --- Command Handling with Server Response Time Recording ---
+
             if data == "UPLOAD":
+                start_time_op = server_analyzer.start_record_time()
                 handle_upload(conn, addr)
+                server_analyzer.stop_record_time(start_time_op, bytes_transferred=0, operation="SERVER_UPLOAD_RESP")
 
             elif data == "DOWNLOAD":
+                start_time_op = server_analyzer.start_record_time()
                 handle_download(conn, addr)
+                server_analyzer.stop_record_time(start_time_op, bytes_transferred=0, operation="SERVER_DOWNLOAD_RESP")
 
             elif data.startswith("DELETE@"):
+                start_time_op = server_analyzer.start_record_time()
                 _, filename = data.split("@", 1)
                 handle_delete(conn, addr, filename)
+                server_analyzer.stop_record_time(start_time_op, bytes_transferred=0, operation="SERVER_DELETE_RESP")
 
             elif data == "DIR":
+                start_time_op = server_analyzer.start_record_time()
                 handle_dir(conn, addr)
+                server_analyzer.stop_record_time(start_time_op, bytes_transferred=0, operation="SERVER_DIR_RESP")
 
             elif data.startswith("SUBFOLDER@"):
+                start_time_op = server_analyzer.start_record_time()
                 parts = data.split("@")
                 if len(parts) == 3:
                     _, action, path = parts
                     handle_subfolder(conn, addr, action, path)
+                server_analyzer.stop_record_time(start_time_op, bytes_transferred=0, operation="SERVER_SUBFOLDER_RESP")
 
             elif data == "LOGOUT":
                 print(f"[{addr}] Client logged out.")
@@ -386,6 +427,11 @@ def handle_client(conn, addr):
     except Exception as e:
         print(f"[{addr}] Error: {e}")
     finally:
+        # Record the total session time
+        server_analyzer.stop_record_time(session_start_time, bytes_transferred=0, operation="SERVER_SESSION_TOTAL")
+
+        # Remove client from pool
+        remove_client_from_pool(addr)
         conn.close()
         print(f"[{addr}] Disconnected.")
 
@@ -395,23 +441,72 @@ def main():
     if not os.path.exists(SERVER_DATA_PATH):
         os.makedirs(SERVER_DATA_PATH)
 
+    # Initialize file counters from existing files
+    get_existing_file_count()
+
     print("[STARTING] Server is starting...")
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Allow port reuse
     server.bind(ADDR)
     server.listen()
-    print(f"[LISTENING] Server is listening on {IP}:{PORT}")
-    print("Press Ctrl+C to stop the server\n")
+    server.settimeout(1.0)  # Set timeout to check for shutdown
 
+    # Initialize server-side network analyzer
+    server_analyzer = NetworkAnalysis(role="Server", address=f"{IP}:{PORT}")  # NEW: Initialize Analyzer
+
+    print(f"[LISTENING] Server is listening on {IP}:{PORT}")
+    print("Press Ctrl+C to stop the server")
+    print("Or use the 'SHUTDOWN' command in an admin client to stop\n")
+
+    print("[FILE NAMING CONVENTION]")
+    print("  TS### - Text files")
+    print("  VS### - Video files")
+    print("  IS### - Image files")
+    print("  AS### - Audio files")
+    print("  PS### - PDF files")
+    print("  DS### - Document files")
+    print("  FS### - Generic files\n")
+
+    shutdown_flag = threading.Event()
+
+    def accept_clients():
+        while not shutdown_flag.is_set():
+            try:
+                conn, addr = server.accept()
+                # Pass the shutdown_flag AND the server_analyzer to the handler
+                thread = threading.Thread(target=handle_client, args=(conn, addr, shutdown_flag, server_analyzer))
+                thread.start()
+                print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 2}")
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if not shutdown_flag.is_set():
+                    print(f"[ERROR] {e}")
+
+    accept_thread = threading.Thread(target=accept_clients, name="AcceptThread")
+    accept_thread.start()
+
+    # --- CORE SHUTDOWN LOGIC ---
     try:
-        while True:
-            conn, addr = server.accept()
-            thread = threading.Thread(target=handle_client, args=(conn, addr))
-            thread.start()
-            print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
+        # Keep the main thread alive, waiting for the shutdown flag to be set
+        while not shutdown_flag.is_set():
+            accept_thread.join(timeout=0.1)  # Check periodically
+
     except KeyboardInterrupt:
-        print("\n[STOPPING] Server is shutting down...")
+        print("\n[STOPPING] Server is shutting down via Ctrl+C...")
+        shutdown_flag.set()
+
     finally:
+        # If the flag was set (by admin or Ctrl+C), wait for the accept thread to finish
+        accept_thread.join(timeout=2)
+
+        # Close the server socket
         server.close()
+        # Save server statistics
+        server_analyzer.save_stats(filename="server_network_stats.csv")  # NEW: Save Server Stats
+
+        print(f"[FINAL STATS] Total active clients at shutdown: {len(list_active_clients())}")
+        print("[SHUTDOWN] Server closed.")
 
 
 if __name__ == "__main__":
