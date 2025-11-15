@@ -8,7 +8,7 @@ from analysis import NetworkAnalysis
 import time
 
 # --- CONSTANTS ---
-IP = "192.168.130.121"
+IP = socket.gethostbyname(socket.gethostname())
 PORT = 4450
 ADDR = (IP, PORT)
 SIZE = 1024
