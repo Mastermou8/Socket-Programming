@@ -1,93 +1,15 @@
 import tkinter as tk
 from tkinter import filedialog, ttk, simpledialog, messagebox
 import threading
-import socket  # Required for client connection constants
 import time
 
-from server import FileServer as FS
+# --- 1. IMPORT THE REAL CLIENT AND CONSTANTS ---
+# We import the real FileClient, the default IP/PORT constants, and the FileServer (FS).
+from client import FileClient, IP, PORT
+from server import FileServer as FS 
 
 
-# --- Refactored FileClient Class (Stub for GUI) ---
-# This class acts as the interface between the GUI and the actual client logic.
-# It now supports logging and authentication as expected by the GUI flow.
-class FileClient:
-    def __init__(self, ip="192.168.130.121", port=4450, log_callback=None):
-        self.ip = ip
-        self.port = port
-        self.addr = (ip, port)
-        self.client_socket = None
-        self.is_connected = False
-        self.is_authenticated = False
-        self.username = None
-        self.log_callback = log_callback  # The function passed by the GUI
-
-        self._log(f"Initialized with target server: {ip}:{port}")
-
-    def _log(self, message):
-        """Internal logging method."""
-        if self.log_callback:
-            self.log_callback(f"[CLIENT] {message}")
-        else:
-            print(f"[CLIENT] {message}")
-
-    def connect(self):
-        """Simulates/Attempts physical connection to the server."""
-        try:
-            # NOTE: In a real app, this would use self.client_socket.connect(self.addr)
-            # For now, simulate a successful connection
-            time.sleep(0.5)
-            self.is_connected = True
-            self._log("Connection successful.")
-            return True
-        except Exception as e:
-            self._log(f"Connection failed: {e}")
-            self.is_connected = False
-            return False
-
-    def authenticate(self, username, password):
-        """Simulates/Attempts user authentication."""
-        if not self.is_connected:
-            self._log("Authentication failed: Not connected.")
-            return False
-
-        # NOTE: In a real app, this would send credentials and wait for AUTH_SUCCESS/AUTH_FAILED
-        if username and password:
-            self.is_authenticated = True
-            self.username = username
-            self._log(f"Authentication successful for user: {username}.")
-            return True
-        else:
-            self._log("Authentication failed: Invalid credentials provided.")
-            return False
-
-    def disconnect(self):
-        """Simulates logging out and closing the socket."""
-        if self.is_connected:
-            # self.client_socket.send("LOGOUT".encode("utf-8")) # Actual logout
-            # self.client_socket.close() # Actual socket close
-            self.is_authenticated = False
-            self.is_connected = False
-            self.username = None
-        self._log("Disconnected.")
-
-    def send_file(self, filepath):
-        """Simulate sending a file."""
-        if not self.is_authenticated:
-            self._log("Upload failed: Not authenticated.")
-            return "ERROR: Not authenticated."
-        self._log(f"Simulating upload of: {filepath}")
-        time.sleep(1)  # Simulate transfer time
-        return f"SUCCESS: Uploaded {filepath} (Simulated)"
-
-    def receive_file(self, filename):
-        """Simulate receiving a file."""
-        if not self.is_authenticated:
-            self._log("Download failed: Not authenticated.")
-            return "ERROR: Not authenticated."
-        self._log(f"Simulating download of: {filename}")
-        time.sleep(1)  # Simulate transfer time
-        return f"SUCCESS: Downloaded {filename} (Simulated)"
-
+# NOTE: The stub FileClient class has been removed and replaced by the actual FileClient imported from client.py.
 
 class FileTransferGUI:
     def __init__(self, window):
@@ -97,7 +19,7 @@ class FileTransferGUI:
 
         # Application State
         self.role = None  # "SERVER" or "CLIENT"
-        self.handler = None
+        self.handler = None # Will hold either FileServer or FileClient instance
         self.server_thread = None
 
         # UI Component references for logging
@@ -194,7 +116,7 @@ class FileTransferGUI:
     def _create_client_operations_frame(self):
         """UI after starting as Client, now including the log."""
         self._clear_frame()
-        self.window.geometry("600x400") # Match server size
+        self.window.geometry("750x450") # Adjusted size for more buttons
         self.window.title(f"File Client Operations - Connected to {self.handler.ip}:{self.handler.port}")
         self.status_var.set("CLIENT CONNECTED: Ready for file operations.")
 
@@ -210,7 +132,7 @@ class FileTransferGUI:
 
         tk.Label(file_name_frame,
                  textvariable=self.file_name_var,
-                 wraplength=400,
+                 wraplength=600,
                  anchor="w",
                  justify="left",
                  bg="white",
@@ -219,12 +141,19 @@ class FileTransferGUI:
         # 2. Buttons Frame (Row 1)
         buttons_frame = ttk.Frame(self.main_frame)
         buttons_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
-        buttons_frame.grid_columnconfigure((0, 1), weight=1)
+        buttons_frame.grid_columnconfigure((0, 1, 2, 3), weight=1) # Four columns for buttons
 
+        # Row 0: Upload/Download
         ttk.Button(buttons_frame, text="Select File (Upload)", command=self._select_file).grid(row=0, column=0, padx=5, pady=5, sticky="ew")
         ttk.Button(buttons_frame, text="Upload to Server", command=self._upload_file).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(buttons_frame, text="Download File", command=self._download_file).grid(row=1, column=0, padx=5, pady=5, sticky="ew")
-        ttk.Button(buttons_frame, text="Disconnect/Logout", command=self._stop_handler).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(buttons_frame, text="Download File", command=self._download_file).grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+        ttk.Button(buttons_frame, text="Delete File", command=self._delete_file).grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+        
+        # Row 1: Utility/Management
+        ttk.Button(buttons_frame, text="List Directory (DIR)", command=self._list_directory).grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+        ttk.Button(buttons_frame, text="Create Folder", command=lambda: self._subfolder_op("CREATE")).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(buttons_frame, text="Delete Folder", command=lambda: self._subfolder_op("DELETE")).grid(row=1, column=2, padx=5, pady=5, sticky="ew")
+        ttk.Button(buttons_frame, text="Disconnect/Logout", command=self._stop_handler).grid(row=1, column=3, padx=5, pady=5, sticky="ew")
 
         # 3. Client Log Frame (Row 2, takes up most space)
         log_frame = ttk.LabelFrame(self.main_frame, text="Client Activity Log")
@@ -264,12 +193,17 @@ class FileTransferGUI:
 
     def _start_client(self):
         """Initializes, connects, and authenticates the FileClient."""
-        ip = simpledialog.askstring("Client Setup", "Enter Server IP:", initialvalue="192.168.130.121")
-        port = simpledialog.askinteger("Client Setup", "Enter Server Port:", initialvalue=4450, minvalue=1024,
+        # --- FIX: Use the imported module-level constants IP and PORT ---
+        default_ip = IP
+        default_port = PORT
+        # ----------------------------------------------------------------
+
+        ip = simpledialog.askstring("Client Setup", "Enter Server IP:", initialvalue=default_ip)
+        port = simpledialog.askinteger("Client Setup", "Enter Server Port:", initialvalue=default_port, minvalue=1024,
                                        maxvalue=65535)
 
         if ip and port:
-            # Pass the centralized logging callback to the FileClient
+            # Instantiate the real FileClient
             self.handler = FileClient(ip, port, log_callback=self._log_message)
             self.role = "CLIENT"
             self._create_client_operations_frame()  # Set up UI first
@@ -278,13 +212,23 @@ class FileTransferGUI:
                 # Prompt for credentials after successful connection
                 username = simpledialog.askstring("Authentication", "Enter Username:")
                 password = simpledialog.askstring("Authentication", "Enter Password:", show='*')
+                
+                # Handle the case where the user cancels the auth dialogs
+                if not username or not password:
+                    self.status_var.set("CLIENT CONNECTED, AUTH CANCELLED")
+                    messagebox.showwarning("Authentication Cancelled", "Authentication cancelled by user. Disconnecting.")
+                    self._stop_handler()
+                    return
 
-                if self.handler.authenticate(username, password):
+                # Authenticate and handle the server's response
+                auth_result = self.handler.authenticate(username, password)
+                
+                if auth_result == "AUTH_SUCCESS":
                     self.status_var.set(f"CLIENT CONNECTED & AUTHENTICATED: User {username}")
                     messagebox.showinfo("Authentication", "Authentication successful!")
                 else:
                     self.status_var.set("CLIENT CONNECTED, AUTH FAILED")
-                    messagebox.showerror("Authentication Failed", "Invalid credentials. Disconnecting.")
+                    messagebox.showerror("Authentication Failed", "Invalid credentials or server error. Disconnecting.")
                     self._stop_handler()  # Disconnect if authentication fails
             else:
                 self.status_var.set("CONNECTION FAILED")
@@ -293,7 +237,7 @@ class FileTransferGUI:
         else:
             self.handler = None
 
-    # ... (_stop_handler, _select_file, _upload_file, _download_file, and _on_closing remain the same, but _log calls are now _log_message) ...
+    # --- Operation Methods ---
 
     def _stop_handler(self):
         """Stops the currently active handler (Server or Client)."""
@@ -333,14 +277,24 @@ class FileTransferGUI:
 
         filepath = self.file_name_var.get()
         if filepath and filepath != "No file selected...":
+            
+            # --- Handle Overwrite Prompt ---
+            # NOTE: The full logic for handling the EXSITS check and prompting for overwrite is complex for a simple thread.
+            # We simplify this by letting the user decide if they want to allow overwrite before the transfer starts.
+            overwrite = "no"
+            if messagebox.askyesno("Overwrite Policy", "Allow file overwrite on the server if it exists?"):
+                overwrite = "yes"
+            # -------------------------------
+            
             # Run file transfer in a thread to keep GUI responsive
-            threading.Thread(target=self._run_upload_in_thread, args=(filepath,)).start()
+            threading.Thread(target=self._run_upload_in_thread, args=(filepath, overwrite)).start()
         else:
             messagebox.showwarning("Upload Error", "Please select a file first.")
 
-    def _run_upload_in_thread(self, filepath):
+    def _run_upload_in_thread(self, filepath, overwrite):
         """Helper to run the upload process and update the GUI afterwards."""
-        result = self.handler.send_file(filepath)
+        # The real FileClient.send_file expects the overwrite argument
+        result = self.handler.send_file(filepath, overwrite=overwrite)
         # Safely update GUI after operation finishes
         self.window.after(0, lambda: self._handle_operation_result(result, "Upload"))
 
@@ -363,24 +317,82 @@ class FileTransferGUI:
         result = self.handler.receive_file(filename)
         # Safely update GUI after operation finishes
         self.window.after(0, lambda: self._handle_operation_result(result, "Download"))
+        
+    def _delete_file(self):
+        """Prompt for filename and call the handler's delete method."""
+        if self.role != "CLIENT" or not self.handler or not self.handler.is_authenticated:
+            messagebox.showwarning("Error", "Must be connected and authenticated as a Client to delete.")
+            return
+
+        filename = simpledialog.askstring("Delete File", "Enter the exact filename (e.g., TS001.txt) to delete:")
+        
+        if filename and messagebox.askyesno("Confirm Deletion", f"Are you sure you want to delete '{filename}' on the server?"):
+            # handle_delete only requires the filename
+            threading.Thread(target=self._run_utility_op_in_thread, args=(self.handler.handle_delete, filename, "Delete")).start()
+        elif filename:
+            messagebox.showinfo("Delete Cancelled", f"Deletion of '{filename}' was cancelled.")
+
+    def _list_directory(self):
+        """Call the handler's directory listing method and display results."""
+        if self.role != "CLIENT" or not self.handler or not self.handler.is_authenticated:
+            messagebox.showwarning("Error", "Must be connected and authenticated as a Client to list directory.")
+            return
+
+        # handle_dir takes no arguments, pass None as a placeholder arg
+        threading.Thread(target=self._run_utility_op_in_thread, args=(self.handler.handle_dir, None, "DIR")).start()
+
+    def _subfolder_op(self, action):
+        """Prompt for folder path and call the handler's subfolder operation method."""
+        if self.role != "CLIENT" or not self.handler or not self.handler.is_authenticated:
+            messagebox.showwarning("Error", "Must be connected and authenticated as a Client to manage folders.")
+            return
+
+        op_name = "Create Folder" if action == "CREATE" else "Delete Folder"
+        prompt = "Enter the relative path of the folder to " + action.lower() + " (e.g., Photos/Vacation):"
+        path = simpledialog.askstring(op_name, prompt)
+
+        if path:
+            if action == "DELETE" and not messagebox.askyesno("Confirm Deletion", f"Are you sure you want to delete the folder '{path}'? It must be empty."):
+                return # Cancelled delete
+
+            # handle_subfolder requires action and path
+            threading.Thread(target=self._run_utility_op_in_thread, args=(self.handler.handle_subfolder, action, path, op_name)).start()
+
+    def _run_utility_op_in_thread(self, func, *args):
+        """Generic helper to run utility operations (Delete, DIR, Folder) and handle the result."""
+        
+        # The operation name is the last argument passed for messaging
+        operation_name = args[-1] if args and isinstance(args[-1], str) else "Operation"
+        
+        # Execute the function based on its signature
+        try:
+            if func.__name__ == 'handle_delete':
+                 result = func(args[0]) # filename
+            elif func.__name__ == 'handle_dir':
+                result = func()
+            elif func.__name__ == 'handle_subfolder':
+                result = func(args[0], args[1]) # action, path
+            else:
+                result = "ERROR: Invalid utility operation function."
+        except Exception as e:
+             result = f"ERROR: Threaded operation failed: {e}"
+
+
+        # Safely update GUI after operation finishes
+        self.window.after(0, lambda: self._handle_operation_result(result, operation_name))
 
     def _handle_operation_result(self, result, operation):
         """Shows the final messagebox based on the operation result."""
-        if "SUCCESS" in result:
+        # For DIR command, result is the listing string
+        if operation == "DIR":
+            messagebox.showinfo(f"Directory Listing", result)
+        # For other commands, check for SUCCESS/ERROR prefix
+        elif result.startswith("SUCCESS") or result.startswith("File uploaded") or result.startswith("File deleted") or result.startswith("Folder"):
             messagebox.showinfo(f"{operation} Complete", result)
+        elif result.startswith("CANCELLED"):
+            messagebox.showinfo(f"{operation} Cancelled", result)
         else:
             messagebox.showerror(f"{operation} Failed", result)
-
-    def _log(self, message):
-        """Internal logging method that calls the GUI callback or prints."""
-        timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
-        full_message = f"{timestamp} {message}"
-
-        if self.log_callback:
-            # Send the message to the GUI's log widget
-            self.log_callback(full_message)
-        else:
-            print(full_message)
 
     def _log_message(self, message):
         """Internal logger that routes the message to the correct log window."""
@@ -413,7 +425,6 @@ class FileTransferGUI:
             self._stop_handler()
 
         self.window.destroy()
-
 
 
 # --- Main execution block for testing the GUI ---
