@@ -4,7 +4,8 @@ import hashlib
 import getpass
 from analysis import NetworkAnalysis
 
-IP = "192.168.130.247"
+# Set a placeholder IP, it will be updated by user input
+IP = "127.0.0.1" 
 PORT = 4450
 ADDR = (IP, PORT)
 SIZE = 1024
@@ -20,6 +21,7 @@ def hash_password(password):
 def send_file(client, filepath, analyzer):
     """Send file to server"""
     try:
+        #gather file information
         filesize = os.path.getsize(filepath)
         filename = os.path.basename(filepath)
 
@@ -27,25 +29,26 @@ def send_file(client, filepath, analyzer):
         start_time = analyzer.start_record_time()
         bytes_transferred = 0
 
-        # Send file metadata
+        # Send file data
         client.send(f"{filename}@{filesize}".encode(FORMAT))
 
-        # Wait for server response (OK or EXISTS)
+        # wait until server respons
         response = client.recv(SIZE).decode(FORMAT)
 
         if response == "EXISTS":
+            #overwrite files
             overwrite = input("File already exists. Overwrite? (yes/no): ")
             client.send(overwrite.encode(FORMAT))
-
+            #check if user said anything other than yes to cancel
             if overwrite.lower() != "yes":
                 print("Upload cancelled.")
                 return
 
             # Wait for final OK
             response = client.recv(SIZE).decode(FORMAT)
-
+        #user confirmation
         if response == "OK":
-            # Send file data
+            # Send data of the file
             with open(filepath, "rb") as f:
                 while True:
                     data = f.read(SIZE)
@@ -59,7 +62,7 @@ def send_file(client, filepath, analyzer):
             print(msg)
 
             # Stop timing and record stats
-            analyzer.stop_record_time(start_time, bytes_transferred)
+            analyzer.stop_record_time(start_time, bytes_transferred, operation="UPLOAD")
 
     except FileNotFoundError:
         print(f"Error: File '{filepath}' not found.")
@@ -81,6 +84,8 @@ def receive_file(client, filename, analyzer):
 
         if response.startswith("ERROR"):
             print(response)
+            # Record operation time (failed attempt)
+            analyzer.stop_record_time(start_time, bytes_transferred=0, operation="DOWNLOAD_FAIL")
             return
 
         # Parse file size
@@ -104,22 +109,25 @@ def receive_file(client, filename, analyzer):
         print(f"File '{filename}' downloaded successfully.")
 
         # Stop timing and record stats
-        analyzer.stop_record_time(start_time, bytes_transferred)
+        analyzer.stop_record_time(start_time, bytes_transferred, operation="DOWNLOAD")
 
     except Exception as e:
         print(f"Error downloading file: {e}")
 
 
-def authenticate(client):
-    """Handle client authentication with password hashing"""
+def authenticate(client, analyzer):
+    """Handle client authentication with password hashing and timing"""
     try:
+        # NEW: Start timing for system response time (Authentication)
+        start_time = analyzer.start_record_time()
+
         # Receive authentication prompt
         msg = client.recv(SIZE).decode(FORMAT)
         print(msg)
 
         username = input("Username: ")
-        # Use regular input instead of getpass for IDE compatibility
-        password = input("Password: ")  # Change back to getpass.getpass() for hidden input
+        # Use getpass.getpass() for hidden input
+        password = getpass.getpass("Password: ") 
 
         # Hash password before sending
         hashed_password = hash_password(password)
@@ -129,6 +137,9 @@ def authenticate(client):
 
         # Receive authentication result
         response = client.recv(SIZE).decode(FORMAT)
+
+        # NEW: Record operation time (System Response Time for AUTH)
+        analyzer.stop_record_time(start_time, bytes_transferred=0, operation="AUTH")
 
         if response == "AUTH_SUCCESS":
             print("Authentication successful!")
@@ -152,7 +163,7 @@ def handle_delete(client, filename, analyzer):
     print(response)
 
     # Record operation time (no significant bytes transferred)
-    analyzer.stop_record_time(start_time, 0)
+    analyzer.stop_record_time(start_time, bytes_transferred=0, operation="DELETE")
 
 
 def handle_dir(client, analyzer):
@@ -166,7 +177,7 @@ def handle_dir(client, analyzer):
     print("\n" + response)
 
     # Record operation time
-    analyzer.stop_record_time(start_time, len(response.encode(FORMAT)))
+    analyzer.stop_record_time(start_time, bytes_transferred=len(response.encode(FORMAT)), operation="DIR")
 
 
 def handle_subfolder(client, action, path, analyzer):
@@ -180,10 +191,18 @@ def handle_subfolder(client, action, path, analyzer):
     print(response)
 
     # Record operation time
-    analyzer.stop_record_time(start_time, 0)
+    analyzer.stop_record_time(start_time, bytes_transferred=0, operation=f"SUBFOLDER_{action}")
 
 
 def main():
+    global IP, ADDR
+
+    # Get IP first and update ADDR
+    server_ip = input("Enter Server IP (e.g., 192.168.130.121): ").strip()
+    if server_ip:
+        IP = server_ip
+        ADDR = (IP, PORT)
+
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client.settimeout(10)  # Set 10 second timeout
     network_analyzer = None
@@ -207,7 +226,7 @@ def main():
             print("Warning: No welcome message received from server")
 
         # Authenticate
-        if not authenticate(client):
+        if not authenticate(client, network_analyzer): # PASS ANALYZER
             client.close()
             return
 
@@ -290,6 +309,19 @@ def main():
                 client.send("LOGOUT".encode(FORMAT))
                 print("Logging out...")
                 break
+            
+            # Allow admin to use the shutdown command
+            elif cmd == "SHUTDOWN":
+                # The server handle_client checks if the user is 'admin'
+                client.send("SHUTDOWN".encode(FORMAT))
+                
+                # Receive server response
+                response = client.recv(SIZE).decode(FORMAT)
+                if response.startswith("OK"):
+                    print(response.split("@")[1])
+                else:
+                    print("Shutdown command failed or rejected by server.")
+                break # Break loop after sending shutdown
 
             else:
                 print(f"Unknown command: {cmd}")
@@ -301,7 +333,7 @@ def main():
     finally:
         print("Disconnected from the server.")
 
-        # Save statistics before closing
+        # Save statistics before closing (client stats are saved to network_stats.csv)
         if network_analyzer:
             network_analyzer.save_stats()
 
