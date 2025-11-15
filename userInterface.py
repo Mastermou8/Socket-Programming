@@ -4,8 +4,6 @@ import threading
 import socket  # Required for client connection constants
 import time
 
-# NOTE: This file assumes that FileServer (FS) in server.py has been refactored
-# into a class and accepts a 'log_callback' argument in its __init__ method.
 from server import FileServer as FS
 
 
