@@ -15,7 +15,7 @@ SIZE = 1024
 FORMAT = "utf-8"
 SERVER_DATA_PATH = "server_data"
 
-# Simple user database (username: hashed_password)
+# Simple user dictionary (username: hashed_password)
 USERS = {
     "admin": "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f",
     "user1": "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
